@@ -1,0 +1,12 @@
+(defun withdraw (amount)
+  (if (>= balance amount)
+      (progn (setf balance (- balance amount))
+	     balance)
+      "Insufficient funds"))
+
+(defun make-withdraw (balance)
+  #'(lambda (amount)
+      (if (>= balance amount)
+	  (progn (setf balance (- balance amount))
+		 balance)
+	  "Insufficient funds")))
