@@ -1,4 +1,5 @@
-#lang sicp
+#lang racket
+(require rnrs/mutable-pairs-6)
 
 (define (eval exp env)
   (cond ((self-evaluating? exp) exp)
@@ -203,3 +204,87 @@
   (cons (make-lambda (let-vars exp)
                      (let-body exp))
         (let-exps exp)))
+
+;;; Evaluator data structures - functions within the evaluator itself; they process the "external" syntax, that is, the input language to the evaluator
+
+(define (true? x) (not (eq? x false)))
+(define (false? x) (eq? x false))
+
+;; Compound procedures differ from lambdas in that they contain the environment
+(define (make-procedure parameters body env)
+  (list 'procedure parameters body env))
+(define (compound-procedure? p)
+  (tagged-list? p 'procedure))
+(define (procedure-parameters p) (cadr p))
+(define (procedure-body p) (caddr p))
+(define (procedure-environment p) (cadddr p))
+
+;; Environment functions - an env is a list of frames; each frame contains variables and their definitions
+(define (enclosing-environment env) (mcdr env))
+(define (first-frame env) (mcar env))
+(define the-empty-environment '())
+
+(define (make-frame variables values)
+  (mcons variables values))
+(define (frame-variables frame) (mcar frame))
+(define (frame-values frame) (cdr frame))
+(define (add-binding-to-frame! var val frame)
+  (set-mcar! frame (mcons var (mcar frame)))
+  (set-cdr! frame (mcons val (cdr frame))))
+
+(define (extend-environment vars vals base-env)
+  (if (= (length vars) (length vals))
+      (mcons (make-frame vars vals) base-env)
+      (if (< (length vars) (length vals))
+          (error "Too many arguments supplied" vars vals)
+          (error "Too few arguments supplied" vars vals))))
+
+;; This uses mutual recursion
+(define (lookup-variable-value var env)
+  (define (env-loop env)
+    (define (scan vars vals)
+      (cond
+        ((null? vars)
+         (env-loop (enclosing-environment env)))
+        ((eq? var (mcar vars)) (mcar vals))
+        (else (scan (cdr vars) (cdr vals)))))
+    (if (eq? env the-empty-environment)
+        (error "Unbound variable" var)
+        (let ((frame (first-frame env)))
+          (scan (frame-variables frame)
+                (frame-values frame)))))
+
+  (env-loop env))
+
+(define (env-general var env action env-action)
+  (define (env-loop env)
+    (define (scan vars vals)
+      (cond
+        ((null? vars)
+         (env-loop (enclosing-environment env)))
+        ((eq? var (mcar vars))
+         (action vals))
+        (else (scan (cdr vars)
+                    (cdr vals)))))
+    (if (eq? env the-empty-environment)
+        (env-action)
+        (let ((frame (first-frame env)))
+          (scan (frame-variables frame)
+                (frame-values frame)))))
+  (env-loop env))
+
+(define (lookup var env)
+  (env-general var
+               env
+               (lambda (vals)
+                 (mcar vals))
+               (lambda ()
+                 (error "Unbound variable" var))))
+
+(define (set-variable-value! var val env)
+  (env-general var
+               env
+               (lambda (vals)
+                 (set-mcar! vals val))
+               (lambda ()
+                 (error "Unbound variable: SET!" var))))
