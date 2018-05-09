@@ -1,5 +1,6 @@
 #lang racket
 (require rnrs/mutable-pairs-6)
+(require compatibility/mlist)
 
 (define (eval exp env)
   (cond ((self-evaluating? exp) exp)
@@ -18,21 +19,21 @@
         ((or? exp) (eval-or (preds-body exp) env))
         ((let? exp) (eval (let->combination exp) env))     ;; Ex 4.6
         ((application? exp)
-         (apply (eval (operator exp) env)
-                (list-of-values (operands exp) env)))
+         (sicp-apply (eval (operator exp) env)
+                     (list-of-values (operands exp) env)))
         (else
          (error "Unknown expression type: EVAL" exp))))
 
-(define (apply procedure arguments)
+(define (sicp-apply procedure arguments)
   (cond ((primitive-procedure? procedure)
          (apply-primitive-procedure procedure arguments))
         ((compound-procedure? procedure)
          (eval-sequence
-          (procedure-body procedure-body)
+          (procedure-body procedure)
           (extend-environment
-           (procedure-parameters procedure)
-           arguments
-           (procedure-environment procedure))))
+           (procedure-parameters procedure) ;; must be mutable list
+           (list->mlist arguments)  ;; must be mutable list
+           (procedure-environment procedure)))) ;; must be mutable list
         (else
          (error "Unknown procedure type: APPLY" procedure))))
 
@@ -94,7 +95,7 @@
       (caadr exp)))
 (define (definition-value exp)
   (if (symbol? (cadr exp))
-      (caadr exp)
+      (caddr exp)
       (make-lambda (cdadr exp)
                    (cddr exp))))
 
@@ -117,7 +118,7 @@
 
 (define (begin? exp) (tagged-list? exp 'begin))
 (define (begin-actions exp) (cdr exp))
-(define (last-exp? seq) (null? cdr seq))
+(define (last-exp? seq) (null? (cdr seq)))
 (define (first-exp seq) (car seq))
 (define (rest-exps seq) (cdr seq))
 
@@ -132,7 +133,7 @@
 (define (operands exp) (cdr exp))
 (define (no-operands? ops) (null? ops))
 (define (first-operand ops) (car ops))
-(define (rest-operand ops) (cdr ops))
+(define (rest-operands ops) (cdr ops))
 
 
 (define (cond? exp) (tagged-list? exp 'cond))
@@ -215,9 +216,14 @@
   (list 'procedure parameters body env))
 (define (compound-procedure? p)
   (tagged-list? p 'procedure))
-(define (procedure-parameters p) (cadr p))
-(define (procedure-body p) (caddr p))
-(define (procedure-environment p) (cadddr p))
+(define (procedure-parameters p)
+  (list->mlist (cadr p)))
+(define (procedure-body p)
+  (caddr p))
+(define (procedure-environment p)
+  (cadddr p))
+
+
 
 ;; Environment functions - an env is a list of frames; each frame contains variables and their definitions
 (define (enclosing-environment env) (mcdr env))
@@ -227,27 +233,27 @@
 (define (make-frame variables values)
   (mcons variables values))
 (define (frame-variables frame) (mcar frame))
-(define (frame-values frame) (cdr frame))
+(define (frame-values frame) (mcdr frame))
 (define (add-binding-to-frame! var val frame)
   (set-mcar! frame (mcons var (mcar frame)))
-  (set-cdr! frame (mcons val (cdr frame))))
+  (set-mcdr! frame (mcons val (mcdr frame))))
 
 (define (extend-environment vars vals base-env)
-  (if (= (length vars) (length vals))
+  (if (= (mlength vars) (mlength vals))
       (mcons (make-frame vars vals) base-env)
-      (if (< (length vars) (length vals))
+      (if (< (mlength vars) (mlength vals))
           (error "Too many arguments supplied" vars vals)
           (error "Too few arguments supplied" vars vals))))
 
 ;; This uses mutual recursion
-(define (lookup-variable-value var env)
+(define (unused-lookup-variable-value var env)
   (define (env-loop env)
     (define (scan vars vals)
       (cond
         ((null? vars)
          (env-loop (enclosing-environment env)))
         ((eq? var (mcar vars)) (mcar vals))
-        (else (scan (cdr vars) (cdr vals)))))
+        (else (scan (mcdr vars) (mcdr vals)))))
     (if (eq? env the-empty-environment)
         (error "Unbound variable" var)
         (let ((frame (first-frame env)))
@@ -256,16 +262,19 @@
 
   (env-loop env))
 
-(define (env-general var env action env-action)
+;; Ex 4.12
+
+(define (env-general var env action frame-action env-action)
   (define (env-loop env)
     (define (scan vars vals)
       (cond
         ((null? vars)
-         (env-loop (enclosing-environment env)))
+         (frame-action env-loop env))
+         ;;(env-loop (enclosing-environment env)))
         ((eq? var (mcar vars))
          (action vals))
-        (else (scan (cdr vars)
-                    (cdr vals)))))
+        (else (scan (mcdr vars)
+                    (mcdr vals)))))
     (if (eq? env the-empty-environment)
         (env-action)
         (let ((frame (first-frame env)))
@@ -273,11 +282,13 @@
                 (frame-values frame)))))
   (env-loop env))
 
-(define (lookup var env)
+(define (lookup-variable-value var env)
   (env-general var
                env
                (lambda (vals)
                  (mcar vals))
+               (lambda (f e)
+                 (f (enclosing-environment e)))
                (lambda ()
                  (error "Unbound variable" var))))
 
@@ -286,5 +297,90 @@
                env
                (lambda (vals)
                  (set-mcar! vals val))
+               (lambda (f e)
+                 (f (enclosing-environment e)))
                (lambda ()
                  (error "Unbound variable: SET!" var))))
+
+(define (define-variable! var val env)
+  (env-general var
+               env
+               (lambda (vals)
+                 (set-mcar! vals val))
+               (lambda (f e)
+                 (add-binding-to-frame! var
+                                        val
+                                        (first-frame e)))
+               (lambda () 'nil)))
+
+
+
+;;; REPL
+
+(define (setup-environment)
+  (let ((initial-env
+         (extend-environment (primitive-procedure-names)
+                             (primitive-procedure-objects)
+                             the-empty-environment)))
+    (define-variable! 'true true initial-env)
+    (define-variable! 'false false initial-env)
+    initial-env))
+
+(define (primitive-procedure? proc)
+  (tagged-list? proc 'primitive))
+(define (primitive-implementation proc) (cadr proc))
+
+(define primitive-procedures
+  (mlist (mcons 'car (mcons car '()))
+         (mcons 'cdr (mcons cdr '()))
+         (mcons 'cons (mcons cons '()))
+         (mcons 'null? (mcons null? '()))
+         (mlist '+ +)
+         (mlist '- -)
+         (mlist '* *)
+         (mlist '/ /)))
+
+(define (primitive-procedure-names)
+  (mmap mcar primitive-procedures))
+(define (primitive-procedure-objects)
+  (mmap (lambda (proc)
+         (list 'primitive (mcar (mcdr proc))))
+       primitive-procedures))
+
+(define (apply-primitive-procedure proc args)
+  (apply-in-underlying-scheme
+   (primitive-implementation proc)
+   args))
+
+(define apply-in-underlying-scheme apply)
+
+;; IO
+(define input-prompt ";;; M-Eval input:")
+(define output-prompt ";;; M-Evam value:")
+(define (driver-loop)
+  (prompt-for-input input-prompt)
+  (let ((input (read)))
+    (let ((output (eval input the-global-environment)))
+      (announce-output output-prompt)
+      (user-print output)))
+  (driver-loop))
+
+(define (prompt-for-input string)
+  (newline) (newline) (display string) (newline))
+(define (announce-output string)
+  (newline) (display string) (newline))
+
+(define (user-print object)
+  (if (compound-procedure? object)
+      (display (list 'compound-procedure
+                     (procedure-parameters object)
+                     (procedure-body object)
+                     '<procedure-env>))
+      (display object)))
+
+
+
+;;; Running the REPL
+
+(define the-global-environment (setup-environment))
+(driver-loop)
